@@ -27,11 +27,17 @@ rm get-docker.sh
 echo "Step 3: Installing Git..."
 sudo apt-get install -y git
 
-# Clone repository
-echo "Step 4: Cloning repository..."
-cd /home/ubuntu
-git clone https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME.git akoliteBackend
-cd akoliteBackend/backend
+# Check if repository already exists, if not clone it
+echo "Step 4: Setting up repository..."
+if [ ! -d "/home/ubuntu/akoliteBackend" ]; then
+    cd /home/ubuntu
+    git clone https://github.com/Praneethaacharya/Draftakolite.git akoliteBackend
+else
+    cd /home/ubuntu/akoliteBackend
+    git pull
+fi
+
+cd /home/ubuntu/akoliteBackend/backend
 
 # Create .env file with production settings
 echo "Step 5: Setting up environment configuration..."
