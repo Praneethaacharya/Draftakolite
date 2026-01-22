@@ -1,50 +1,76 @@
+require('dotenv').config();
+
 const express = require("express");
 const cors = require("cors");
-const { MongoClient } = require("mongodb");
+const https = require("https");
+const fs = require("fs");
+const path = require("path");
+const { connectDB } = require('./src/db');
+const config = require('./config');
 const data = require("./data"); // your resin definitions
+const { verifyToken } = require('./src/middleware/auth');
 
+// Import Routers
+const authRouter = require('./src/routes/auth');
+const suppliersRouter = require('./src/routes/suppliers');
+const clientsRouter = require('./src/routes/clients');
+const reportsRouter = require('./src/routes/reports');
+const producedResinsRouter = require('./src/routes/producedResins');
+const expensesRouter = require('./src/routes/expenses');
+const overtimeRouter = require('./src/routes/overtime');
+const ordersRouter = require('./src/routes/orders');
+const resinsRouter = require('./src/routes/resins');
+const sellersRouter = require('./src/routes/sellers');
+const billingRouter = require('./src/routes/billing');
 
 const app = express();
-const port = 5000;
+const port = config.PORT;
 
+// Configure CORS to allow your frontend domain
+const corsOptions = {
+  origin: [
+    'https://akoliteresin.github.io',
+    'https://dj4haaiis0la7.cloudfront.net',
+    'http://localhost:3000',
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
 
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 
+// Global error handling middleware - log all errors
+app.use((err, req, res, next) => {
+  console.error('Error caught by middleware:', {
+    message: err.message,
+    stack: err.stack,
+    url: req.url,
+    method: req.method
+  });
+  res.status(err.status || 500).json({
+    message: err.message || 'Internal Server Error',
+    error: process.env.NODE_ENV === 'development' ? err : {}
+  });
+});
 
-const uri = "mongodb://127.0.0.1:27017";
-const client = new MongoClient(uri);
+// Authentication routes (no token required)
+app.use('/api/auth', authRouter);
 
-
-async function connectDB() {
-  if (!client.topology?.isConnected()) await client.connect();
-  const db = client.db("resinDB");
-  const rawCollection = db.collection("raw_materials");
-  const producedCollection = db.collection("produced_resins");
-
-
-  // initialize raw materials if DB empty
-  const count = await rawCollection.countDocuments();
-  if (count === 0) {
-    const materials = [];
-    data.forEach((resin) => {
-      resin.raw_materials.forEach((mat) => {
-        if (!materials.find((m) => m.name === mat.name)) {
-          materials.push({ name: mat.name, totalQuantity: 0, updatedAt: new Date() });
-        }
-      });
-    });
-    await rawCollection.insertMany(materials);
-    console.log("✅ Initialized raw_materials in DB");
-  }
-
-
-  return { rawCollection, producedCollection };
-}
-
+// Protect all other routes with JWT verification
+app.use('/api/suppliers', verifyToken, suppliersRouter);
+app.use('/api/clients', verifyToken, clientsRouter);
+app.use('/api/sellers', verifyToken, sellersRouter);
+app.use('/api/reports', verifyToken, reportsRouter);
+app.use('/api/expenses', verifyToken, expensesRouter);
+app.use('/api/overtime', verifyToken, overtimeRouter);
+app.use('/api/future-orders', verifyToken, ordersRouter);
+app.use('/api/resins', verifyToken, resinsRouter);
+app.use('/api/billing', verifyToken, billingRouter);
+app.use('/api', verifyToken, producedResinsRouter); // Handles /produce-resin, /produced-resins, etc.
 
 // ---------------- Raw Materials APIs ----------------
-
 
 // GET all raw materials
 app.get("/api/raw-materials", async (req, res) => {
@@ -58,12 +84,10 @@ app.get("/api/raw-materials", async (req, res) => {
   }
 });
 
-
 // Add stock
 app.post("/api/raw-materials/add", async (req, res) => {
   const { name, quantity } = req.body;
   if (!name || quantity == null) return res.status(400).json({ message: "Invalid input" });
-
 
   try {
     const { rawCollection } = await connectDB();
@@ -79,12 +103,10 @@ app.post("/api/raw-materials/add", async (req, res) => {
   }
 });
 
-
 // Modify total quantity
 app.put("/api/raw-materials/modify", async (req, res) => {
   const { name, newQuantity } = req.body;
   if (!name || newQuantity == null) return res.status(400).json({ message: "Invalid input" });
-
 
   try {
     const { rawCollection } = await connectDB();
@@ -98,114 +120,55 @@ app.put("/api/raw-materials/modify", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+// NOTE: Resin GET/POST/PUT/DELETE handled by `resins` router (falls back to static `data` when DB empty)
 
-
-// ---------------- Resin Production API ----------------
-
-
-app.post("/api/produce-resin", async (req, res) => {
-  const { resinType, litres } = req.body;
-  if (!resinType || !litres) return res.status(400).json({ message: "Invalid input" });
-
-
-  const resin = data.find((r) => r.name === resinType);
-  if (!resin) return res.status(400).json({ message: `Resin type "${resinType}" not found` });
-
-
-  const totalRatio = resin.raw_materials.reduce((sum, r) => sum + r.ratio, 0);
-
-
-  // calculate required quantity for each raw material
-  const requiredMaterials = resin.raw_materials.map((r) => ({
-    material: r.name,
-    requiredQty: (r.ratio / totalRatio) * litres,
-  }));
-
-
-  try {
-    const { rawCollection, producedCollection } = await connectDB();
-    const insufficient = [];
-
-
-    // Check if enough stock
-    for (const reqMat of requiredMaterials) {
-      const mat = await rawCollection.findOne({ name: reqMat.material });
-      if (!mat || mat.totalQuantity < reqMat.requiredQty) {
-        insufficient.push(reqMat.material);
-      }
-    }
-
-
-    if (insufficient.length > 0) {
-      return res.status(400).json({
-        message: `Cannot produce resin. Insufficient stock: ${insufficient.join(", ")}`,
-      });
-    }
-
-
-    // Subtract raw materials
-    for (const reqMat of requiredMaterials) {
-      await rawCollection.updateOne(
-        { name: reqMat.material },
-        { $inc: { totalQuantity: -reqMat.requiredQty }, $set: { updatedAt: new Date() } }
-      );
-      console.log(`✅ Subtracted ${reqMat.requiredQty} of ${reqMat.material}`);
-    }
-
-
-    // Save production record
-    await producedCollection.insertOne({
-      resinType,
-      litres: Number(litres),
-      producedAt: new Date(),
-      materialsUsed: requiredMaterials,
-    });
-
-
-    res.json({
-      message: `Produced ${litres} litres of ${resinType}`,
-      requiredMaterials,
-    });
-  } catch (err) {
-    console.error("POST /produce-resin error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
+// Global error handler middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ message: 'Internal server error', error: err.message });
 });
 
-
-// ---------------- Produced Resins API ----------------
-
-
-// app.get("/api/produced-resins", async (req, res) => {
-//   try {
-//     const { producedCollection } = await connectDB();
-//     const producedList = await producedCollection.find().sort({ producedAt: -1 }).toArray();
-//     res.json(producedList);
-//   } catch (err) {
-//     console.error("GET /produced-resins error:", err);
-//     res.status(500).json({ message: "Server error" });
-//   }
-// });
-
-
-
-
-app.get("/api/produced-resins", async (req, res) => {
-  const resins = await producedCollection.find().sort({ producedAt: -1 }).toArray();
-  const safeResins = resins.map(r => ({
-    ...r,
-    _id: r._id.toString(),
-    producedAt: r.producedAt ? new Date(r.producedAt).toISOString() : null,
-  }));
-  res.json(safeResins);
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ message: 'Route not found' });
 });
-
-
-// ---------------- Optional: Get Resin Definitions ----------------
-app.get("/api/resins", (req, res) => {
-  res.json(data);
-});
-
 
 // ---------------- Start Server ----------------
-app.listen(port, () => console.log(`✅ Server running on http://localhost:${port}`));
+
+// Try to load SSL certificates for HTTPS
+const sslOptions = {};
+const keyPath = process.env.SSL_KEY_PATH || '/etc/ssl/private/server.key';
+const certPath = process.env.SSL_CERT_PATH || '/etc/ssl/certs/server.crt';
+
+if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+  sslOptions.key = fs.readFileSync(keyPath);
+  sslOptions.cert = fs.readFileSync(certPath);
+  console.log('✅ SSL certificates loaded. Starting HTTPS server...');
+}
+
+let server;
+if (Object.keys(sslOptions).length > 0) {
+  // Use HTTPS if certificates are available
+  server = https.createServer(sslOptions, app);
+} else {
+  // Fall back to HTTP if no certificates
+  const http = require('http');
+  server = http.createServer(app);
+}
+
+server.listen(port, config.HOST, () => {
+  const protocol = Object.keys(sslOptions).length > 0 ? 'HTTPS' : 'HTTP';
+  console.log(`✅ Server running on ${protocol} at ${config.getServerUrl()}`);
+});
+
+server.on('error', (err) => {
+  console.error('Server failed to start:', err);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
