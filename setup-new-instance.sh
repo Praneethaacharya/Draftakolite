@@ -32,12 +32,20 @@ echo "Step 4: Setting up repository..."
 if [ ! -d "/home/ubuntu/akoliteBackend" ]; then
     cd /home/ubuntu
     git clone https://github.com/Praneethaacharya/Draftakolite.git akoliteBackend
-else
-    cd /home/ubuntu/akoliteBackend
-    git pull
 fi
 
-cd /home/ubuntu/akoliteBackend/backend
+cd /home/ubuntu/akoliteBackend
+git pull
+
+# Verify backend directory exists
+if [ ! -d "backend" ]; then
+    echo "ERROR: backend directory not found in repository!"
+    echo "Current directory contents:"
+    ls -la
+    exit 1
+fi
+
+cd backend
 
 # Create .env file with production settings
 echo "Step 5: Setting up environment configuration..."
